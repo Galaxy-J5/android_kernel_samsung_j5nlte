@@ -196,9 +196,10 @@ void mdss_dsi_panel_cmds_send(struct mdss_dsi_ctrl_pdata *ctrl,
 	/*Panel ON/Off commands should be sent in DSI Low Power Mode*/
 	if (pcmds->link_state == DSI_LP_MODE)
 		cmdreq.flags  |= CMD_REQ_LP_MODE;
+
 #if defined(CONFIG_FB_MSM_MDSS_SAMSUNG)
 	else if (pcmds->link_state == DSI_HS_MODE)
-		cmdreq.flags  |= CMD_REQ_HS_MODE;
+		cmdreq.flags |= CMD_REQ_HS_MODE;
 #endif
 
 	cmdreq.rlen = 0;
