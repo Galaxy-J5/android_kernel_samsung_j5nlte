@@ -31,6 +31,7 @@
 #define VSYNC_PERIOD 17
 
 struct mdss_dsi_ctrl_pdata *ctrl_list[DSI_CTRL_MAX];
+static struct mdss_dsi_ctrl_pdata *ctrl_backup;
 
 struct mdss_hw mdss_dsi0_hw = {
 	.hw_ndx = MDSS_HW_DSI0,
@@ -72,6 +73,12 @@ static struct mdss_dsi_event dsi_event;
 
 static int dsi_event_thread(void *data);
 
+#if defined(CONFIG_FB_MSM_MDSS_SAMSUNG)
+struct mdss_dsi_ctrl_pdata **mdss_dsi_get_ctrl(void)
+{
+	return ctrl_list;
+}
+#endif
 void mdss_dsi_ctrl_init(struct device *ctrl_dev,
 			struct mdss_dsi_ctrl_pdata *ctrl)
 {
@@ -901,7 +908,7 @@ void mdss_dsi_op_mode_config(int mode,
 			DSI_INTR_CMD_MDP_DONE_MASK | DSI_INTR_BTA_DONE_MASK;
 	}
 
-	dma_ctrl = BIT(28) | BIT(26);	/* embedded mode & LP mode */
+	dma_ctrl = BIT(28);	/* embedded mode & HS mode */
 	if (mdss_dsi_sync_wait_enable(ctrl_pdata))
 		dma_ctrl |= BIT(31);
 
@@ -1395,13 +1402,25 @@ do_send:
 		pkt_size = rlen;
 		rx_byte = 4;
 	} else {
-		short_response = 0;
-		data_byte = 10;	/* first read */
+		/*short_response = 0;
+		data_byte = 10;
 		if (rlen < data_byte)
 			pkt_size = rlen;
 		else
 			pkt_size = data_byte;
-		rx_byte = data_byte + 6; /* 4 header + 2 crc */
+		rx_byte = data_byte + 6;*/
+
+		short_response = 0;
+		data_byte = 8;	/* first read */
+		/*
+		 * add extra 2 padding bytes to have overall
+		 * packet size is multipe by 4. This also make
+		 * sure 4 bytes dcs headerlocates within a
+		 * 32 bits register after shift in.
+		 */
+		pkt_size = data_byte + 2;
+		rx_byte = data_byte + 8; /* 4 header + 2 crc  + 2 padding*/
+
 	}
 
 
@@ -1561,12 +1580,33 @@ end:
 	return rp->read_cnt;
 }
 
+#if defined(CONFIG_FB_MSM_MDSS_SAMSUNG)
+dma_addr_t debug_mdss_dma_addr;
+u32 debug_mdss_dma_register;
+static void mdss_dma_tx_packet_print(struct mdss_dsi_ctrl_pdata *ctrl,
+					struct dsi_buf *tp)
+{
+	int i;
+	char pBuffer[tp->len * 6];
+
+	memset(pBuffer, 0x00, tp->len * 6);
+
+	for (i = 0; i < tp->len; i++)
+		snprintf(pBuffer + strnlen(pBuffer, tp->len * 6), tp->len * 6, " %02x", tp->data[i]);
+
+	pr_debug("%s(%d) : %s\n", __func__, ctrl->ndx, pBuffer);
+
+	return;
+}
+#endif
+
 #define DMA_TX_TIMEOUT 200
 
 static int mdss_dsi_cmd_dma_tx(struct mdss_dsi_ctrl_pdata *ctrl,
 					struct dsi_buf *tp)
 {
 	int len, ret = 0;
+	int dma_addr_phy_virt_flag = 0; /*0:phyical addr  1:virtual addr */
 	int domain = MDSS_IOMMU_DOMAIN_UNSECURE;
 	char *bp;
 	struct mdss_dsi_ctrl_pdata *mctrl = NULL;
@@ -1577,6 +1617,9 @@ static int mdss_dsi_cmd_dma_tx(struct mdss_dsi_ctrl_pdata *ctrl,
 	len = ALIGN(tp->len, 4);
 	ctrl->dma_size = ALIGN(tp->len, SZ_4K);
 
+#if defined(CONFIG_FB_MSM_MDSS_SAMSUNG)
+	mdss_dma_tx_packet_print(ctrl, tp);
+#endif
 
 	if (ctrl->mdss_util->iommu_attached()) {
 		int ret = msm_iommu_map_contig_buffer(tp->dmap,
@@ -1586,6 +1629,11 @@ static int mdss_dsi_cmd_dma_tx(struct mdss_dsi_ctrl_pdata *ctrl,
 			pr_err("unable to map dma memory to iommu(%d)\n", ret);
 			return -ENOMEM;
 		}
+
+#if defined(CONFIG_FB_MSM_MDSS_SAMSUNG)
+		debug_mdss_dma_addr = ctrl->dma_addr;
+		dma_addr_phy_virt_flag = 1;
+#endif
 	} else {
 		ctrl->dma_addr = tp->dmap;
 	}
@@ -1633,10 +1681,17 @@ static int mdss_dsi_cmd_dma_tx(struct mdss_dsi_ctrl_pdata *ctrl,
 
 	ret = wait_for_completion_timeout(&ctrl->dma_comp,
 				msecs_to_jiffies(DMA_TX_TIMEOUT));
-	if (ret == 0)
+	if (ret == 0) {
+		pr_err("MIPI dma tx timeout!!\n");
+		MDSS_XLOG_TOUT_HANDLER("mdp", "dsi0", "dsi1", "edp", "hdmi", "panic");
 		ret = -ETIMEDOUT;
-	else
+	} else
 		ret = tp->len;
+
+
+#if defined(CONFIG_FB_MSM_MDSS_SAMSUNG)
+	debug_mdss_dma_register = MIPI_INP((ctrl->ctrl_base) + 0x048);
+#endif
 
 	if (mctrl && mctrl->dma_addr) {
 		if (ignored) {
@@ -1654,7 +1709,7 @@ static int mdss_dsi_cmd_dma_tx(struct mdss_dsi_ctrl_pdata *ctrl,
 		mctrl->dma_size = 0;
 	}
 
-	if (ctrl->mdss_util->iommu_attached()) {
+	if (ctrl->mdss_util->iommu_attached() && dma_addr_phy_virt_flag) {
 		msm_iommu_unmap_contig_buffer(ctrl->dma_addr,
 			ctrl->mdss_util->get_iommu_domain(domain),
 							0, ctrl->dma_size);
@@ -1838,6 +1893,7 @@ void mdss_dsi_cmd_mdp_start(struct mdss_dsi_ctrl_pdata *ctrl)
 	spin_lock_irqsave(&ctrl->mdp_lock, flag);
 	mdss_dsi_enable_irq(ctrl, DSI_MDP_TERM);
 	ctrl->mdp_busy = true;
+	ctrl_backup = ctrl;
 	INIT_COMPLETION(ctrl->mdp_comp);
 	MDSS_XLOG(ctrl->ndx, ctrl->mdp_busy, current->pid);
 	spin_unlock_irqrestore(&ctrl->mdp_lock, flag);

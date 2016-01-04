@@ -110,6 +110,7 @@ enum pageflags {
 	PG_compound_lock,
 #endif
 	PG_readahead,		/* page in a readahead window */
+
 	__NR_PAGEFLAGS,
 
 	/* Filesystems */
@@ -277,6 +278,7 @@ PAGEFLAG_FALSE(HWPoison)
 #endif
 
 u64 stable_page_flags(struct page *page);
+
 
 static inline int PageUptodate(struct page *page)
 {
